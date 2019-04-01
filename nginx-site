@@ -1,0 +1,23 @@
+upstream dashboard {
+    server 127.0.0.1:49152;
+}
+
+server {
+	listen 80 default_server;
+	listen [::]:80 default_server;
+
+	root /var/www;
+
+	index index.html index.htm index.nginx-debian.html;
+
+	server_name _;
+
+    location /static {
+        alias /var/www;
+    }
+
+    location / {
+        uwsgi_pass  dashboard;
+        include     /etc/nginx/uwsgi_params;
+    }
+}

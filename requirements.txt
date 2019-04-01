@@ -1,0 +1,5 @@
+pymemcache
+django
+pytz
+requests
+uwsgi
