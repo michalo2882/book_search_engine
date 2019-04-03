@@ -1,11 +1,14 @@
+import logging
 import base64
 import os
-from collections import OrderedDict
 from operator import itemgetter
 import datetime
 import requests
 from pymemcache.client.base import Client
 from pymemcache import serde
+
+
+log = logging.getLogger(__name__)
 
 
 def memcache_client():
@@ -25,7 +28,7 @@ def get_or_create_allegro_token():
                 if datetime.datetime.utcnow() < allegro_token['expires']:
                     return allegro_token['token']
         except ConnectionRefusedError:
-            pass
+            log.error('Cache client unavailable')
 
     client_id = os.environ.get('ALLEGRO_CLIENT_ID', None)
     client_secret = os.environ.get('ALLEGRO_CLIENT_SECRET', None)
@@ -38,6 +41,10 @@ def get_or_create_allegro_token():
     })
     auth_data = resp.json()
 
+    if resp.status_code != 200:
+        log.error(f'Allegro auth failed: {resp.status_code}')
+        log.error(f'{auth_data}')
+
     if cache_client:
         try:
             expires = datetime.datetime.utcnow() + datetime.timedelta(seconds=auth_data['expires_in'])
@@ -46,7 +53,11 @@ def get_or_create_allegro_token():
                 'expires': expires
             })
         except ConnectionRefusedError:
-            pass
+            log.error('Cache client unavailable')
+
+    if 'access_token' not in auth_data:
+        log.error('`access_token` missing in the response')
+        return None
 
     return auth_data['access_token']
 
@@ -54,6 +65,7 @@ def get_or_create_allegro_token():
 def search_allegro(phrase):
     token = get_or_create_allegro_token()
     if not token:
+        log.debug('Allegro token is missing. Skipping the search')
         return []
     phrase = phrase.replace(' ', '+')
     resp = requests.get(f'https://api.allegro.pl/offers/listing?category.id=7&phrase={phrase}', headers={
@@ -61,26 +73,37 @@ def search_allegro(phrase):
         'Accept': 'application/vnd.allegro.public.v1+json',
     })
     data = resp.json()
+    if resp.status_code != 200:
+        log.error(f'Allegro search failed: {resp.status_code}')
+        log.error(f'{data}')
 
     if 'items' not in data:
+        log.error(f'`items` missing in the Allegro response')
         return []
 
-    items = data['items']['promoted'] + data['items']['regular']
-    items = [{
-        'name': item['name'],
-        'link': f'https://allegro.pl/oferta/{item["id"]}',
-        'price': float(item['sellingMode']['price']['amount']),
-        'currency': item['sellingMode']['price']['currency'],
-        'isbn': None,
-        'source': 'Allegro'
-    } for item in items]
-    return items
+    try:
+        items = data['items']['promoted'] + data['items']['regular']
+        items = [{
+            'name': item['name'],
+            'link': f'https://allegro.pl/oferta/{item["id"]}',
+            'price': float(item['sellingMode']['price']['amount']),
+            'currency': item['sellingMode']['price']['currency'],
+            'isbn': None,
+            'source': 'Allegro'
+        } for item in items]
+        return items
+    except KeyError as e:
+        log.error(f'Allegro result conversion error: {e}')
+        return []
 
 
 def search_google(phrase):
     phrase = phrase.replace(' ', '+')
     resp = requests.get(f'https://www.googleapis.com/books/v1/volumes?q={phrase}&country=pl')
     data = resp.json()
+    if resp.status_code != 200:
+        log.error(f'Google search failed: {resp.status_code}')
+        log.error(f'{data}')
 
     def extract_isbn(item):
         try:
@@ -92,17 +115,22 @@ def search_google(phrase):
         return None
 
     if 'items' not in data:
+        log.error(f'`items` missing in the Google response')
         return []
 
-    items = [{
-        'name': item['volumeInfo']['title'],
-        'link': item['saleInfo'].get('buyLink', None),
-        'price': float(item['saleInfo']['listPrice']['amount']) if 'listPrice' in item['saleInfo'] else 0,
-        'currency': item['saleInfo']['listPrice']['currencyCode'] if 'listPrice' in item['saleInfo'] else None,
-        'isbn': extract_isbn(item),
-        'source': 'Google Books'
-    } for item in data['items']]
-    return items
+    try:
+        items = [{
+            'name': item['volumeInfo']['title'],
+            'link': item['saleInfo'].get('buyLink', None),
+            'price': float(item['saleInfo']['listPrice']['amount']) if 'listPrice' in item['saleInfo'] else 0,
+            'currency': item['saleInfo']['listPrice']['currencyCode'] if 'listPrice' in item['saleInfo'] else None,
+            'isbn': extract_isbn(item),
+            'source': 'Google Books'
+        } for item in data['items']]
+        return items
+    except KeyError as e:
+        log.error(f'Google result conversion error: {e}')
+        return []
 
 
 def search_all(phrase):
